@@ -1,0 +1,5 @@
+together
+flask
+flask_cors
+pydantic
+dotenv
