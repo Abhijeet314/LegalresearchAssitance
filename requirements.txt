@@ -1,6 +1,5 @@
-together
-flask
-flask_cors
-pydantic
-dotenv
-gunicorn
+google-generativeai 
+flask 
+flask-cors 
+pydantic 
+python-dotenv
