@@ -317,4 +317,6 @@ def internal_error(error):
 
 if __name__ == '__main__':
     print("Starting Legal Advisor API...")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Allow overriding the port via the PORT environment variable for easier testing
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=True, host='0.0.0.0', port=port)
