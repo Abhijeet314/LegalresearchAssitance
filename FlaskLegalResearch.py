@@ -36,21 +36,37 @@ class LegalAdvisor:
         # Configure Gemini
         genai.configure(api_key=self.gemini_api_key)
         
-        # Initialize the Gemini model
-        # Using gemini-1.5-flash for faster responses or gemini-1.5-pro for more complex analysis
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        # Initialize the Gemini model with proper configuration
+        self.model = genai.GenerativeModel(
+            model_name='gemini-1.5-flash',
+            generation_config={
+                "temperature": 0.3,
+                "top_p": 0.95,
+                "top_k": 40,
+                "max_output_tokens": 8192,
+                "response_mime_type": "application/json",
+            }
+        )
         
     def _extract_json_from_response(self, text: str) -> str:
         """Extract JSON from response text that might contain markdown or extra text"""
         # Remove markdown code blocks if present
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
+        text = text.strip()
         
         # Find JSON object boundaries
         if '{' in text and '}' in text:
             start_idx = text.find('{')
-            end_idx = text.rfind('}') + 1
-            return text[start_idx:end_idx]
+            # Find the matching closing brace
+            brace_count = 0
+            for i in range(start_idx, len(text)):
+                if text[i] == '{':
+                    brace_count += 1
+                elif text[i] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        return text[start_idx:i+1]
         return text
         
     def analyze_case(self, case_type: str, opposition_demand: str, additional_details: str) -> Dict:
@@ -59,61 +75,74 @@ class LegalAdvisor:
             # Start timer to measure response time
             start_time = time.time()
             
-            # Create the prompt for Gemini
-            prompt = f"""You are a highly knowledgeable legal AI assistant specialized in Indian law, with extensive experience advising lawyers on legal strategy. You have detailed knowledge of Indian legal precedents, statutes, and court judgments.
+            # Create the prompt for Gemini - more structured for JSON output
+            prompt = f"""You are a legal AI assistant specialized in Indian law. Analyze the following case and provide a JSON response.
 
-CURRENT CASE INFORMATION:
-Case Type: {case_type}
-Opposition's Demand: {opposition_demand}
-Additional Details: {additional_details}
+CASE DETAILS:
+- Case Type: {case_type}
+- Opposition's Demand: {opposition_demand}
+- Additional Details: {additional_details}
 
-Based on your comprehensive knowledge of Indian law and similar precedents, provide a detailed analysis addressing the following aspects:
+Provide a comprehensive legal analysis in the following JSON structure:
 
-1. Identify the key legal principles that apply to this case under Indian law.
-2. Analyze common patterns seen in similar cases in Indian courts.
-3. List the most relevant legal precedents (including specific case citations if possible) and their outcomes. For each precedent, include:
-   - The case name (e.g., "Mohiri Bibi v. Dharmodas Ghose" or other relevant Indian cases)
-   - A brief description of the outcome and its relevance to the current case
-4. Provide strategic recommendations for handling this case, with specific tactics.
-5. Identify potential risk factors and challenges the lawyer should prepare for.
-6. Present strong arguments that would be persuasive to Indian judges in this matter.
-7. Predict the likely outcome based on precedent analysis and current legal climate in India.
-
-Your response MUST be in valid JSON format that matches this structure exactly:
 {{
-  "key_principles": ["principle 1", "principle 2", "principle 3"],
-  "patterns": ["pattern 1", "pattern 2", "pattern 3"],
-  "precedents": [
-    {{"case": "Case Name 1", "outcome": "Detailed outcome and relevance"}},
-    {{"case": "Case Name 2", "outcome": "Detailed outcome and relevance"}}
+  "key_principles": [
+    "List 3-5 key legal principles under Indian law that apply to this case"
   ],
-  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"],
-  "risk_factors": ["risk 1", "risk 2", "risk 3"],
-  "strong_arguments": ["argument 1", "argument 2", "argument 3"],
-  "likely_outcome": "Detailed prediction of the case outcome"
+  "patterns": [
+    "List 3-5 common patterns seen in similar cases in Indian courts"
+  ],
+  "precedents": [
+    {{
+      "case": "Full case name (e.g., State of Maharashtra v. Som Nath Thapa)",
+      "outcome": "Detailed outcome and how it applies to this case"
+    }}
+  ],
+  "recommendations": [
+    "List 3-5 strategic recommendations with specific tactics"
+  ],
+  "risk_factors": [
+    "List 3-5 potential risks and challenges to prepare for"
+  ],
+  "strong_arguments": [
+    "List 3-5 persuasive arguments for Indian judges"
+  ],
+  "likely_outcome": "Detailed prediction based on precedents and current legal climate in India"
 }}
 
-IMPORTANT: 
-- Respond with ONLY the JSON object, no additional text or markdown formatting
-- Include at least 3-5 items per field where appropriate
-- All precedents must be actual Indian legal cases
-- Ensure all JSON keys match exactly as shown above
-
-DO NOT include any explanatory text before or after the JSON."""
+Ensure all precedents are actual Indian legal cases. Provide detailed, actionable insights."""
             
-            # Make the API call to Gemini
-            response = self.model.generate_content(
-                prompt,
-                generation_config=genai.GenerationConfig(
-                    temperature=0.3,
-                    top_p=0.95,
-                    top_k=40,
-                    max_output_tokens=8192,
-                )
-            )
-            
-            # Get text from the response
-            raw_response = response.text
+            # Make the API call to Gemini with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = self.model.generate_content(prompt)
+                    
+                    # Check if response was blocked
+                    if not response.text:
+                        if hasattr(response, 'prompt_feedback'):
+                            return {
+                                "error": "Response blocked by safety filters",
+                                "key_principles": ["The request was blocked due to safety settings"],
+                                "patterns": [],
+                                "precedents": [],
+                                "recommendations": ["Please rephrase your case details and try again"],
+                                "risk_factors": [],
+                                "strong_arguments": [],
+                                "likely_outcome": "Unable to analyze due to content filtering",
+                                "response_time": f"{time.time() - start_time:.2f} seconds"
+                            }
+                    
+                    # Get text from the response
+                    raw_response = response.text
+                    break
+                    
+                except Exception as api_err:
+                    if attempt < max_retries - 1:
+                        time.sleep(1)  # Wait before retry
+                        continue
+                    else:
+                        raise api_err
             
             # Calculate response time
             response_time = time.time() - start_time
@@ -126,29 +155,49 @@ DO NOT include any explanatory text before or after the JSON."""
                 # Parse JSON
                 analysis_dict = json.loads(clean_text)
                 
-                # Create Pydantic model instance
+                # Validate and ensure all required fields exist
+                required_fields = {
+                    "key_principles": [],
+                    "patterns": [],
+                    "precedents": [],
+                    "recommendations": [],
+                    "risk_factors": [],
+                    "strong_arguments": [],
+                    "likely_outcome": ""
+                }
+                
+                for field, default in required_fields.items():
+                    if field not in analysis_dict:
+                        analysis_dict[field] = default
+                
+                # Create Pydantic model instance for validation
                 analysis = LegalCaseAnalysis(**analysis_dict)
                 
                 # Convert to dictionary for JSON response
-                response_data = analysis.dict()
+                response_data = analysis.model_dump() if hasattr(analysis, 'model_dump') else analysis.dict()
                 response_data["response_time"] = f"{response_time:.2f} seconds"
                 
                 return response_data
             
             except json.JSONDecodeError as json_err:
-                # If JSON parsing fails, return a structured error
+                # If JSON parsing fails, return a structured error with raw response for debugging
+                print(f"JSON Decode Error: {json_err}")
+                print(f"Raw response: {raw_response[:500]}")  # Print first 500 chars for debugging
+                
                 return {
                     "error": f"Error parsing JSON response: {str(json_err)}",
                     "key_principles": ["Unable to parse model response - invalid JSON format"],
-                    "patterns": [],
+                    "patterns": ["The AI model returned an improperly formatted response"],
                     "precedents": [],
                     "recommendations": ["Please try again with more specific details about your case"],
                     "risk_factors": ["Technical error in response parsing"],
                     "strong_arguments": [],
                     "likely_outcome": "Unable to determine due to parsing error",
-                    "response_time": f"{response_time:.2f} seconds"
+                    "response_time": f"{response_time:.2f} seconds",
+                    "debug_info": f"Response preview: {raw_response[:200]}..."
                 }
             except Exception as parse_err:
+                print(f"Parse Error: {parse_err}")
                 return {
                     "error": f"Error processing response: {str(parse_err)}",
                     "key_principles": [f"Error in parsing model response: {str(parse_err)}"],
@@ -162,6 +211,7 @@ DO NOT include any explanatory text before or after the JSON."""
                 }
         
         except Exception as e:
+            print(f"Analysis Error: {e}")
             return {
                 "error": f"Error during analysis: {str(e)}",
                 "key_principles": [f"Error in analysis: {str(e)}"],
@@ -177,8 +227,12 @@ DO NOT include any explanatory text before or after the JSON."""
 # Initialize the legal advisor globally
 try:
     legal_advisor = LegalAdvisor()
+    print("Legal Advisor initialized successfully")
 except ValueError as e:
     print(f"Error initializing Legal Advisor: {e}")
+    legal_advisor = None
+except Exception as e:
+    print(f"Unexpected error initializing Legal Advisor: {e}")
     legal_advisor = None
 
 @app.route('/api/health', methods=['GET'])
@@ -215,9 +269,16 @@ def analyze_case():
             }), 400
             
         # Get data from request
-        case_type = data.get('case_type')
-        opposition_demand = data.get('opposition_demand')
-        additional_details = data.get('additional_details', '')
+        case_type = data.get('case_type', '').strip()
+        opposition_demand = data.get('opposition_demand', '').strip()
+        additional_details = data.get('additional_details', '').strip()
+        
+        # Validate non-empty after strip
+        if not case_type or not opposition_demand:
+            return jsonify({
+                "error": "Invalid input",
+                "message": "case_type and opposition_demand cannot be empty"
+            }), 400
         
         # Process the case analysis
         analysis = legal_advisor.analyze_case(case_type, opposition_demand, additional_details)
@@ -225,6 +286,7 @@ def analyze_case():
         return jsonify(analysis)
         
     except Exception as e:
+        print(f"Request Error: {e}")
         return jsonify({
             "error": str(e),
             "message": "Server error while processing your request"
@@ -254,4 +316,5 @@ def internal_error(error):
     }), 500
 
 if __name__ == '__main__':
+    print("Starting Legal Advisor API...")
     app.run(debug=True, host='0.0.0.0', port=5000)
