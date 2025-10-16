@@ -23,37 +23,85 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 print(f"API Key Status: {'Found' if GEMINI_API_KEY else 'NOT FOUND'}")
 print(f"API Key (first 10 chars): {GEMINI_API_KEY[:10] if GEMINI_API_KEY else 'None'}...")
 
+genai = None
+SELECTED_MODEL_NAME = None
 model = None
 if GEMINI_API_KEY:
     try:
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
-        
-        # Try different model names in order of preference
-        model_names = [
+
+        # Try to programmatically list available models (if supported by the SDK)
+        available_models = []
+        try:
+            list_models_fn = getattr(genai, 'list_models', None)
+            if callable(list_models_fn):
+                models = genai.list_models()
+                # models may be a list of dicts/objects depending on SDK version
+                for m in models:
+                    try:
+                        # prefer .name attribute but fall back to str()
+                        name = getattr(m, 'name', None) or m.get('name') if isinstance(m, dict) else str(m)
+                    except Exception:
+                        name = str(m)
+                    available_models.append(name)
+        except Exception as e:
+            print(f"Warning: Unable to list models programmatically: {e}")
+
+        if available_models:
+            print(f"Available models (sample): {available_models[:20]}")
+
+        # Candidate model names to attempt (Gemini-first). We'll prefer any Gemini model
+        preferred_candidates = [
             'gemini-1.5-flash',
-            'gemini-1.5-pro', 
-            'gemini-pro',
+            'gemini-1.5-pro',
+            'gemini-1.5',
+            'gemini-1.0',
+            'gemini-1',
             'models/gemini-1.5-flash',
-            'models/gemini-1.5-pro'
+            'models/gemini-1.5-pro',
+            'text-bison-001'
         ]
-        
-        for model_name in model_names:
+
+        # Build a prioritized list of candidates: models reported by API that look like Gemini, then preferred list
+        candidates = []
+        for m in available_models:
+            if 'gemini' in m.lower() or 'bison' in m.lower():
+                candidates.append(m)
+        # append preferred ones that are not already included
+        for c in preferred_candidates:
+            if c not in candidates:
+                candidates.append(c)
+
+        # If listing failed and no candidates found, still attempt preferred candidates
+        if not candidates:
+            candidates = preferred_candidates[:]
+
+        # Try each candidate until one initializes successfully using top-level generate_content
+        for model_name in candidates:
             try:
-                model = genai.GenerativeModel(model_name)
-                # Test the model with a simple prompt
-                test_response = model.generate_content("Say 'ready'")
-                print(f"✓ Gemini model '{model_name}' initialized successfully")
+                # Test the model by calling the top-level generate_content API with the model name string
+                test_resp = genai.generate_content(
+                    model=model_name,
+                    prompt="Say 'ready'",
+                    generation_config=genai.GenerationConfig(max_output_tokens=10)
+                )
+                # If we get here, the model name is valid for generate_content
+                print(f"✓ Gemini model '{model_name}' is usable for generate_content")
+                SELECTED_MODEL_NAME = model_name
+                model = True
                 break
-            except Exception as model_error:
-                print(f"✗ Model '{model_name}' failed: {str(model_error)}")
+            except Exception as gen_err:
+                print(f"✗ Model '{model_name}' not usable with generate_content: {gen_err}")
+                SELECTED_MODEL_NAME = None
+                model = None
                 continue
-        
-        if not model:
-            print("✗ All model attempts failed")
-            
+
+        if not SELECTED_MODEL_NAME:
+            print("✗ All model attempts failed. Confirm your API key has access to Gemini models and call genai.list_models() to inspect available names and supported methods.")
+
     except Exception as e:
-        print(f"✗ Error initializing Gemini: {str(e)}")
+        print(f"✗ Error initializing Gemini SDK: {str(e)}")
         model = None
 else:
     print("✗ GEMINI_API_KEY not found in environment variables")
@@ -228,7 +276,7 @@ def analyze_case():
         print(f"Model available: {model is not None}")
         
         # If model is available, use AI analysis
-        if model:
+        if model and SELECTED_MODEL_NAME and genai is not None:
             try:
                 print("Generating AI analysis...")
                 prompt = create_legal_analysis_prompt(
@@ -238,14 +286,15 @@ def analyze_case():
                 )
                 
                 # Generate response with error handling
-                response = model.generate_content(
-                    prompt,
-                    generation_config={
-                        'temperature': 0.7,
-                        'top_p': 0.8,
-                        'top_k': 40,
-                        'max_output_tokens': 2048,
-                    }
+                response = genai.generate_content(
+                    model=SELECTED_MODEL_NAME,
+                    prompt=prompt,
+                    generation_config=genai.GenerationConfig(
+                        temperature=0.7,
+                        top_p=0.8,
+                        top_k=40,
+                        max_output_tokens=2048,
+                    )
                 )
                 
                 print(f"AI response received (length: {len(response.text)} chars)")
