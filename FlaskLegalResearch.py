@@ -3,7 +3,6 @@ from flask_cors import CORS
 import os
 import time
 from dotenv import load_dotenv
-import google.generativeai as genai
 
 # Load environment variables
 load_dotenv()
@@ -21,12 +20,43 @@ CORS(app, resources={
 
 # Configure Gemini API
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+print(f"API Key Status: {'Found' if GEMINI_API_KEY else 'NOT FOUND'}")
+print(f"API Key (first 10 chars): {GEMINI_API_KEY[:10] if GEMINI_API_KEY else 'None'}...")
+
+model = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-pro')
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # Try different model names in order of preference
+        model_names = [
+            'gemini-1.5-flash',
+            'gemini-1.5-pro', 
+            'gemini-pro',
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-pro'
+        ]
+        
+        for model_name in model_names:
+            try:
+                model = genai.GenerativeModel(model_name)
+                # Test the model with a simple prompt
+                test_response = model.generate_content("Say 'ready'")
+                print(f"✓ Gemini model '{model_name}' initialized successfully")
+                break
+            except Exception as model_error:
+                print(f"✗ Model '{model_name}' failed: {str(model_error)}")
+                continue
+        
+        if not model:
+            print("✗ All model attempts failed")
+            
+    except Exception as e:
+        print(f"✗ Error initializing Gemini: {str(e)}")
+        model = None
 else:
-    model = None
-    print("Warning: GEMINI_API_KEY not found. Using sample data only.")
+    print("✗ GEMINI_API_KEY not found in environment variables")
 
 # Sample data for fallback
 SAMPLE_ANALYSIS = {
@@ -82,28 +112,33 @@ def create_legal_analysis_prompt(case_type, opposition_demand, additional_detail
 **Case Details:**
 - Case Type: {case_type}
 - Opposition's Demand/Claim: {opposition_demand}
-- Additional Details: {additional_details}
+- Additional Details: {additional_details if additional_details else "No additional details provided"}
 
-**Please provide a structured analysis in the following format:**
+**Provide a detailed analysis covering:**
 
-1. **Key Legal Principles** (3-5 relevant legal principles applicable to this case)
-2. **Common Patterns** (3-4 patterns typically seen in similar cases)
-3. **Relevant Precedents** (2-3 relevant case precedents with case names and outcomes)
-4. **Strategic Recommendations** (4-6 actionable recommendations)
-5. **Risk Factors** (3-4 potential risks to consider)
-6. **Strong Arguments** (3-4 strong arguments for the client's case)
-7. **Likely Outcome** (A brief assessment of the probable outcome)
+1. KEY LEGAL PRINCIPLES (3-5 relevant legal principles from Indian law)
+2. COMMON PATTERNS (3-4 patterns seen in similar cases)
+3. RELEVANT PRECEDENTS (2-3 actual or representative Indian case precedents)
+4. STRATEGIC RECOMMENDATIONS (4-6 actionable steps)
+5. RISK FACTORS (3-4 potential risks to consider)
+6. STRONG ARGUMENTS (3-4 strong legal arguments for the client)
+7. LIKELY OUTCOME (brief assessment with reasoning)
 
-Format your response as a JSON object with these keys:
-- key_principles (array of strings)
-- patterns (array of strings)
-- precedents (array of objects with "case" and "outcome" keys)
-- recommendations (array of strings)
-- risk_factors (array of strings)
-- strong_arguments (array of strings)
-- likely_outcome (string)
+**IMPORTANT**: Return your response as a valid JSON object with this exact structure:
+{{
+  "key_principles": ["principle1", "principle2", ...],
+  "patterns": ["pattern1", "pattern2", ...],
+  "precedents": [
+    {{"case": "Case Name vs. Party (Year)", "outcome": "Brief outcome description"}},
+    ...
+  ],
+  "recommendations": ["recommendation1", "recommendation2", ...],
+  "risk_factors": ["risk1", "risk2", ...],
+  "strong_arguments": ["argument1", "argument2", ...],
+  "likely_outcome": "Detailed outcome assessment"
+}}
 
-Ensure all information is based on Indian law and jurisprudence."""
+Ensure the JSON is properly formatted and all fields are populated with substantive legal analysis based on Indian law."""
     
     return prompt
 
@@ -112,32 +147,53 @@ def parse_ai_response(response_text):
     import json
     import re
     
-    # Try to extract JSON from the response
     try:
-        # Look for JSON content between ```json and ``` or just parse the whole thing
-        json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+        # Clean the response text
+        cleaned = response_text.strip()
+        
+        # Try to extract JSON from markdown code blocks
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', cleaned, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
             # Try to find JSON object directly
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            json_match = re.search(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', cleaned, re.DOTALL)
             if json_match:
-                json_str = json_match.group(0)
+                json_str = json_match.group(1)
             else:
-                json_str = response_text
+                json_str = cleaned
         
+        # Parse JSON
         parsed = json.loads(json_str)
+        
+        # Validate required fields
+        required_fields = ['key_principles', 'patterns', 'precedents', 
+                          'recommendations', 'risk_factors', 'strong_arguments', 
+                          'likely_outcome']
+        
+        for field in required_fields:
+            if field not in parsed:
+                print(f"Warning: Missing field '{field}' in AI response")
+                parsed[field] = [] if field != 'likely_outcome' else 'Analysis unavailable'
+        
+        print("✓ Successfully parsed AI response")
         return parsed
-    except:
-        # If JSON parsing fails, return sample data
-        return SAMPLE_ANALYSIS
+        
+    except json.JSONDecodeError as e:
+        print(f"✗ JSON parsing error: {str(e)}")
+        print(f"Response text: {response_text[:500]}...")
+        return None
+    except Exception as e:
+        print(f"✗ Error parsing response: {str(e)}")
+        return None
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "model_available": model is not None
+        "model_available": model is not None,
+        "api_key_configured": GEMINI_API_KEY is not None
     }), 200
 
 @app.route('/api/example', methods=['GET'])
@@ -167,39 +223,75 @@ def analyze_case():
                 "error": "Both case_type and opposition_demand are required"
             }), 400
         
+        print(f"\n{'='*50}")
+        print(f"Analyzing case: {case_type}")
+        print(f"Model available: {model is not None}")
+        
         # If model is available, use AI analysis
         if model:
             try:
+                print("Generating AI analysis...")
                 prompt = create_legal_analysis_prompt(
                     case_type, 
                     opposition_demand, 
                     additional_details
                 )
                 
-                # Generate response
-                response = model.generate_content(prompt)
+                # Generate response with error handling
+                response = model.generate_content(
+                    prompt,
+                    generation_config={
+                        'temperature': 0.7,
+                        'top_p': 0.8,
+                        'top_k': 40,
+                        'max_output_tokens': 2048,
+                    }
+                )
+                
+                print(f"AI response received (length: {len(response.text)} chars)")
                 
                 # Parse the response
                 analysis = parse_ai_response(response.text)
                 
+                if analysis:
+                    print("✓ Using AI-generated analysis")
+                    # Add metadata
+                    analysis["source"] = "AI Generated"
+                    analysis["model"] = "Gemini 1.5 Flash"
+                else:
+                    print("✗ Failed to parse AI response, using sample data")
+                    analysis = SAMPLE_ANALYSIS.copy()
+                    analysis["source"] = "Sample Data (Parse Error)"
+                    analysis["likely_outcome"] = f"AI analysis failed to parse. Based on the {case_type.lower()} case, strategic legal approach recommended."
+                
             except Exception as e:
-                print(f"AI generation error: {str(e)}")
+                print(f"✗ AI generation error: {str(e)}")
                 # Fallback to sample data with customization
                 analysis = SAMPLE_ANALYSIS.copy()
+                analysis["source"] = "Sample Data (API Error)"
                 analysis["likely_outcome"] = f"Based on the {case_type.lower()} case details provided, analysis suggests proceeding with strategic legal approach to address the opposition's demand."
+                analysis["error_details"] = str(e)
         else:
+            print("✗ Model not available, using sample data")
             # Use sample data if no model
             analysis = SAMPLE_ANALYSIS.copy()
+            analysis["source"] = "Sample Data (No API Key)"
             analysis["likely_outcome"] = f"Based on the {case_type.lower()} case details provided, analysis suggests proceeding with strategic legal approach to address the opposition's demand."
         
         # Calculate response time
         response_time = round(time.time() - start_time, 2)
         analysis["response_time"] = f"{response_time} seconds"
         
+        print(f"Analysis complete in {response_time}s")
+        print(f"Source: {analysis.get('source', 'Unknown')}")
+        print(f"{'='*50}\n")
+        
         return jsonify(analysis), 200
         
     except Exception as e:
-        print(f"Error in analyze_case: {str(e)}")
+        print(f"✗ Error in analyze_case: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             "error": "Internal server error",
             "message": str(e)
@@ -210,10 +302,13 @@ def test():
     """Simple test endpoint"""
     return jsonify({
         "message": "Legal Research API is running",
+        "model_status": "Available" if model else "Not Available",
+        "api_key_status": "Configured" if GEMINI_API_KEY else "Not Configured",
         "endpoints": {
             "health": "/api/health",
             "example": "/api/example",
-            "analyze": "/api/analyze (POST)"
+            "analyze": "/api/analyze (POST)",
+            "test": "/api/test"
         }
     }), 200
 
@@ -227,4 +322,9 @@ def internal_error(e):
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
+    print(f"\n{'='*50}")
+    print(f"Starting Legal Research API on port {port}")
+    print(f"Model Status: {'✓ Ready' if model else '✗ Not Available'}")
+    print(f"API Key Status: {'✓ Configured' if GEMINI_API_KEY else '✗ Not Configured'}")
+    print(f"{'='*50}\n")
     app.run(host='0.0.0.0', port=port, debug=True)
